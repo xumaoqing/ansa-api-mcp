@@ -27,13 +27,13 @@ dependencies = [
 ]
 
 [project.scripts]
-ansa-api-mcp = "tools.mcp_server:main"
+ansa-api-mcp = "ansa_tools.mcp_server:main"
 
 [tool.setuptools.packages.find]
-include = ["tools*"]
+include = ["ansa_tools*"]
 
 [tool.setuptools.package-data]
-tools = ["ansa_api_index.json", "txt_docs/*.txt"]
+ansa_tools = ["ansa_api_index.json", "txt_docs/*.txt"]
 
 [project.optional-dependencies]
 dev = [

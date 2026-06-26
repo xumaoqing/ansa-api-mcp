@@ -10,7 +10,6 @@ import re
 import unicodedata
 from importlib.resources import files
 from pathlib import Path
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -53,8 +52,8 @@ class AnsaApiSearcher:
     def search(
         self,
         query: str,
-        module: Optional[str] = None,
-        category: Optional[str] = None,
+        module: str | None = None,
+        category: str | None = None,
         top_n: int = 5,
     ) -> list[dict]:
         """Three-layer search: keyword -> fuzzy -> txt fallback."""
@@ -126,18 +125,50 @@ class AnsaApiSearcher:
             clean.append({k: v for k, v in func.items() if not k.startswith("_")})
         return clean
 
+    def list_modules(self) -> list[dict]:
+        """Return all modules with function counts."""
+        modules = self.metadata.get("modules", [])
+        if not modules:
+            modules = sorted({f.get("module", "") for f in self.functions if f.get("module")})
+        result = []
+        for mod in modules:
+            count = sum(1 for f in self.functions if f.get("module") == mod)
+            result.append({"module": mod, "function_count": count})
+        return result
+
+    def list_categories(self) -> list[dict]:
+        """Return all categories with function counts."""
+        cats: dict[str, int] = {}
+        for f in self.functions:
+            cat = f.get("category", "")
+            if cat:
+                cats[cat] = cats.get(cat, 0) + 1
+        return [{"category": k, "function_count": v} for k, v in sorted(cats.items())]
+
 
 # Default paths
-_PKG_DIR = files("tools")
+_PKG_DIR = files("ansa_tools")
 _INDEX_PATH = str(_PKG_DIR.joinpath("ansa_api_index.json"))
 _BUNDLED_TXT_DOCS = str(_PKG_DIR.joinpath("txt_docs"))
 _TXT_DOCS_PATH = os.environ.get("ANSA_TXT_DOCS_PATH", _BUNDLED_TXT_DOCS)
 
 # MCP server instance
-mcp = FastMCP("ansa-api")
+mcp = FastMCP(
+    "ansa-api",
+    instructions="""This server provides search access to ANSA Python API documentation.
+ANSA is the pre-processing tool from BETA CAE Systems for CAE mesh generation.
+
+Available tools:
+- search_ansa_api(query, module?, category?, top_n?): Search the ANSA API docs
+- list_ansa_modules(): List all available ANSA API modules  
+- list_ansa_categories(): List all ANSA API function categories
+- get_ansa_function(function_name, module?): Get full docs for a specific function
+
+Always use these tools when the user asks about ANSA API, mesh operations, or CAE pre-processing."""
+)
 
 # Module-level searcher (initialized if index exists)
-_searcher: Optional[AnsaApiSearcher] = None
+_searcher: AnsaApiSearcher | None = None
 
 
 def _get_searcher() -> AnsaApiSearcher:
@@ -183,8 +214,8 @@ def _format_result(func: dict) -> str:
 @mcp.tool()
 def search_ansa_api(
     query: str,
-    module: Optional[str] = None,
-    category: Optional[str] = None,
+    module: str | None = None,
+    category: str | None = None,
     top_n: int = 5,
 ) -> str:
     """Search the ANSA Python API documentation.
@@ -207,6 +238,119 @@ def search_ansa_api(
         parts.append(f"---\n\n**{i}. {func['name']}**\n")
         parts.append(_format_result(func))
         parts.append("")
+
+    return "\n".join(parts)
+
+
+def _normalize_ansa_module(module: str | None) -> str | None:
+    """Ensure module name has 'ansa.' prefix if it looks like a short module name."""
+    if module is None:
+        return None
+    # If it looks like a short name (no dots, or starts with known sub-module prefix)
+    # Also handles cases like "mesh" → "ansa.mesh"
+    if not module.startswith("ansa.") and module != "ansa":
+        # Check if it matches a known module suffix
+        known_modules = {m for m in _get_searcher().metadata.get("modules", [])}
+        prefixed = f"ansa.{module}" if not module.startswith("ansa.") else module
+        if prefixed in known_modules:
+            return prefixed
+        # Also check if any module ends with this name
+        for m in known_modules:
+            if m.endswith(f".{module}"):
+                return m
+    return module
+
+
+@mcp.tool()
+def list_ansa_modules() -> str:
+    """List all available ANSA Python API modules.
+
+    Returns a table of all modules and their function counts.
+    Use this to discover what modules are available before searching.
+    """
+    try:
+        searcher = _get_searcher()
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+
+    modules = searcher.list_modules()
+    metadata = searcher.metadata
+
+    lines = [
+        "## ANSA API Modules",
+        f"*Total functions: {metadata.get('total_functions', '?')}  |  "
+        f"API version: {metadata.get('api_version', '?')}*",
+        "",
+    ]
+    for item in modules:
+        mod = item["module"]
+        count = item["function_count"]
+        lines.append(f"- `{mod}` — {count} functions")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def list_ansa_categories() -> str:
+    """List all available ANSA API function categories.
+
+    Categories group functions by their purpose within a module.
+    Use these as the `category` filter in search_ansa_api.
+    """
+    try:
+        searcher = _get_searcher()
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+
+    categories = searcher.list_categories()
+    lines = ["## ANSA API Categories", ""]
+    for item in categories:
+        cat = item["category"]
+        count = item["function_count"]
+        lines.append(f"- `{cat}` — {count} functions")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_ansa_function(function_name: str, module: str | None = None) -> str:
+    """Get full documentation for a specific ANSA API function by exact name.
+
+    Args:
+        function_name: Exact function name (case-sensitive).
+                       Examples: "MeshCreateShell", "GetEntity", "base.GetEntity"
+        module: Optional module to narrow the search (e.g. "ansa.mesh", "ansa.base")
+    """
+    try:
+        searcher = _get_searcher()
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+
+    candidates = searcher.functions
+    mod_filter = _normalize_ansa_module(module)
+    if mod_filter:
+        candidates = [f for f in candidates if f.get("module") == mod_filter]
+
+    matches = [f for f in candidates if f.get("name") == function_name]
+
+    if not matches:
+        # Try case-insensitive
+        matches = [f for f in candidates
+                   if f.get("name", "").lower() == function_name.lower()]
+
+    if not matches:
+        # Try partial name match (function name might include module prefix)
+        matches = [f for f in candidates
+                   if f.get("name", "").endswith(f".{function_name}")
+                   or function_name.endswith(f".{f.get('name', '')}")]
+
+    if not matches:
+        return f"Function `{function_name}` not found in ANSA API index."
+
+    parts = [f"## `{function_name}` — ANSA API\n"]
+    for func in matches:
+        clean = {k: v for k, v in func.items() if not k.startswith("_")}
+        parts.append(_format_result(clean))
 
     return "\n".join(parts)
 
@@ -273,7 +417,11 @@ def main():
         success = _install_mcp()
         sys.exit(0 if success else 1)
 
-    mcp.run()
+    try:
+        mcp.run()
+    except (BrokenPipeError, EOFError, KeyboardInterrupt):
+        pass
+    sys.exit(0)
 
 
 if __name__ == "__main__":

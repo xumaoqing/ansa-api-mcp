@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from tools.parse_html import parse_all_html
-from tools.generate_keywords import generate_keywords_for_functions
+from ansa_tools.parse_html import parse_all_html
+from ansa_tools.generate_keywords import generate_keywords_for_functions
 
 
 # ---------------------------------------------------------------------------
